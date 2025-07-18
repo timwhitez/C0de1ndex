@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+
 	openai "github.com/sashabaranov/go-openai"
 )
 

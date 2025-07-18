@@ -15,7 +15,7 @@ import (
 // AnalyzeFileWithLLM sends a single file's content to the LLM for analysis.
 func AnalyzeFileWithLLM(c *llm.LLMClient, filePath, fileContent, model string) (*types.FileAnalysis, error) {
 	// If the file is large, split it into chunks and analyze each chunk.
-	if len(fileContent) > 30000 { // Simple character limit for now
+	if len(fileContent) > 32000 { // If file content exceeds 32k, chunk it
 		fmt.Printf("File %s is very large, splitting into chunks...\n", filePath)
 		chunks := SplitCodeIntoChunks(fileContent, GetLanguageFromFile(filePath))
 		var chunkAnalyses []*types.FileAnalysis

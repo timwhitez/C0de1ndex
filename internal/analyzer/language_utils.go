@@ -1,52 +1,65 @@
 package analyzer
 
 import (
+	"log"
 	"path/filepath"
 	"strings"
 )
 
-// languageMappings maps file extensions to programming language names.
-// languageMappings 将文件扩展名映射到编程语言名称。
-var languageMappings = map[string]string{
-	".go":   "Go",
-	".js":   "JavaScript",
-	".ts":   "TypeScript",
-	".py":   "Python",
-	".java": "Java",
-	".cs":   "C#",
-	".cpp":  "C++",
-	".c":    "C",
-	".h":    "C Header",
-	".rs":   "Rust",
-	".rb":   "Ruby",
-	".php":  "PHP",
-	".html": "HTML",
-	".css":  "CSS",
-	".md":   "Markdown",
-	".sh":   "Shell",
-	".swift": "Swift",
-	".kt": "Kotlin",
-	".scala": "Scala",
+// Language defines the properties of a programming language.
+type Language struct {
+	Name        string
+	LineComment string
+}
+
+// languages maps file extensions to language properties.
+var languages = map[string]Language{
+	".go":    {Name: "Go"},
+	".js":    {Name: "JavaScript"},
+	".ts":    {Name: "TypeScript"},
+	".py":    {Name: "Python"},
+	".java":  {Name: "Java"},
+	".c":     {Name: "C"},
+	".h":     {Name: "C"},
+	".cpp":   {Name: "C++"},
+	".hpp":   {Name: "C++"},
+	".cs":    {Name: "C#"},
+	".rb":    {Name: "Ruby"},
+	".rs":    {Name: "Rust"},
+	".php":   {Name: "PHP"},
+	".html":  {Name: "HTML"},
+	".css":   {Name: "CSS"},
+	".md":    {Name: "Markdown"},
+	".sh":    {Name: "Shell"},
+	".swift": {Name: "Swift"},
+	".kt":    {Name: "Kotlin"},
+	".scala": {Name: "Scala"},
 }
 
 // GetLanguageFromFile determines the programming language from a file path.
-// GetLanguageFromFile 从文件路径确定编程语言。
 func GetLanguageFromFile(filePath string) string {
 	ext := strings.ToLower(filepath.Ext(filePath))
-	if lang, ok := languageMappings[ext]; ok {
-		return lang
+	if lang, ok := languages[ext]; ok {
+		return lang.Name
 	}
 	return "Text" // Default to Text if unknown
 }
 
 // SplitCodeIntoChunks splits a large file into smaller chunks based on function or class boundaries.
-// This is a simplified implementation and may not be perfect for all languages.
-// SplitCodeIntoChunks 将大文件根据函数或类边界分割成小块。
-// 这是一个简化的实现，可能不适用于所有语言。
+// It uses a tree-sitter based chunker for supported languages, and falls back to a simple line-based split.
 func SplitCodeIntoChunks(content, language string) []string {
-	// For now, we will use a simple line-based splitting for all languages.
-	// A more sophisticated approach would use language-specific parsers.
-	lines := strings.Split(content, "\n")
+	chunker := NewTreeSitterChunker()
+	chunks, err := chunker.Split(content, language)
+	if err != nil {
+		log.Printf("error splitting code with tree-sitter for language %s: %v. Falling back to simple split.", language, err)
+		return fallbackSplit(content)
+	}
+	return chunks
+}
+
+func fallbackSplit(code string) []string {
+	// Simple line-based splitting for unsupported languages.
+	lines := strings.Split(code, "\n")
 	var chunks []string
 	var currentChunk strings.Builder
 
