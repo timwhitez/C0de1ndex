@@ -90,19 +90,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4. Filter files using the LLM
-	fmt.Println("使用LLM过滤文件...")
-	filteredFiles, err := llmClient.FilterFilesWithLLM(allFiles, ignorePatterns, model)
-	if err != nil {
-		fmt.Printf("Error filtering files with LLM: %v\n", err)
-		os.Exit(1)
+	// 4. First apply rule-based filtering
+	fmt.Println("应用规则过滤...")
+	// Parse exclude patterns from command line
+	var excludePatternsSlice []string
+	if excludePatterns != "" {
+		excludePatternsSlice = strings.Split(excludePatterns, ",")
+		for i := range excludePatternsSlice {
+			excludePatternsSlice[i] = strings.TrimSpace(excludePatternsSlice[i])
+		}
 	}
+	ruleFilteredFiles := analyzer.FilterFilesByRules(allFiles, ignorePatterns, excludePatternsSlice)
+	fmt.Printf("规则过滤后剩余 %d 个文件\n", len(ruleFilteredFiles))
 
-	// Also apply the manual include/exclude patterns
+	// Apply include extensions filter before LLM filtering
 	if includeExts != "" {
 		extensions := strings.Split(includeExts, ",")
 		var tempFiltered []string
-		for _, file := range filteredFiles {
+		for _, file := range ruleFilteredFiles {
 			for _, ext := range extensions {
 				if strings.HasSuffix(file, strings.TrimSpace(ext)) {
 					tempFiltered = append(tempFiltered, file)
@@ -110,27 +115,21 @@ func main() {
 				}
 			}
 		}
-		filteredFiles = tempFiltered
+		ruleFilteredFiles = tempFiltered
+		fmt.Printf("扩展名过滤后剩余 %d 个文件\n", len(ruleFilteredFiles))
 	}
 
-	if excludePatterns != "" {
-		patterns := strings.Split(excludePatterns, ",")
-		var tempFiltered []string
-		for _, file := range filteredFiles {
-			shouldExclude := false
-			for _, pattern := range patterns {
-				matched, _ := filepath.Match(strings.TrimSpace(pattern), file)
-				if matched {
-					shouldExclude = true
-					break
-				}
-			}
-			if !shouldExclude {
-				tempFiltered = append(tempFiltered, file)
-			}
-		}
-		filteredFiles = tempFiltered
+	// 5. Then apply LLM filtering
+	fmt.Println("使用LLM进行智能过滤...")
+	filteredFiles, err := llmClient.FilterFilesWithLLM(ruleFilteredFiles, ignorePatterns, model)
+	if err != nil {
+		fmt.Printf("Error filtering files with LLM: %v\n", err)
+		os.Exit(1)
 	}
+
+
+
+
 
 	if debug {
 		fmt.Println("\n--- Filtered Files (Post-Exclusion) ---")
