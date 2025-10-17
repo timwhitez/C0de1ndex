@@ -23,7 +23,7 @@
 1.  **创建 `.env` 文件**: 将示例配置文件复制到一个名为 `.env` 的新文件中。
 
     ```bash
-    cp .env.example .env
+    cp env.example .env
     ```
 
 2.  **编辑 `.env`**: 打开 `.env` 文件，并添加您的 API 密钥和 API 的基本 URL。
