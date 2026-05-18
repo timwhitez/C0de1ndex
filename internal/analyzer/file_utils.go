@@ -20,6 +20,7 @@ type ignorePattern struct {
 	pattern  string
 	negated  bool
 	dirOnly  bool
+	anchored bool
 	hasSlash bool
 	regex    *regexp.Regexp
 }
@@ -45,7 +46,6 @@ func ScanFiles(root string, opts ScanOptions) ([]string, error) {
 	patterns = append(patterns, builtInExcludePatterns...)
 	patterns = append(patterns, opts.ExcludePatterns...)
 	compiledPatterns := compileIgnorePatterns(patterns)
-	hasNegations := hasNegationPattern(compiledPatterns)
 	ignoreList := scanIgnoreList()
 
 	var files []string
@@ -72,7 +72,7 @@ func ScanFiles(root string, opts ScanOptions) ([]string, error) {
 		relPath = filepath.ToSlash(relPath)
 
 		if d.IsDir() {
-			if isIgnoredCompiled(relPath, true, compiledPatterns) && !hasNegations {
+			if isIgnoredCompiled(relPath, true, compiledPatterns) && !canReincludeDescendant(relPath, compiledPatterns) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -200,6 +200,7 @@ func compileIgnorePattern(pattern string) (ignorePattern, bool) {
 	if negated {
 		pattern = strings.TrimPrefix(pattern, "!")
 	}
+	anchored := strings.HasPrefix(pattern, "/")
 	dirOnly := strings.HasSuffix(pattern, "/")
 	pattern = strings.TrimSuffix(pattern, "/")
 	pattern = strings.TrimPrefix(pattern, "/")
@@ -215,6 +216,7 @@ func compileIgnorePattern(pattern string) (ignorePattern, bool) {
 		pattern:  pattern,
 		negated:  negated,
 		dirOnly:  dirOnly,
+		anchored: anchored,
 		hasSlash: strings.Contains(pattern, "/"),
 		regex:    re,
 	}, true
@@ -224,6 +226,13 @@ func (p ignorePattern) matches(filePath string, isDir bool) bool {
 	filePath = filepath.ToSlash(filePath)
 	if p.dirOnly && !isDir && !strings.Contains(filePath, "/") && !p.regex.MatchString(filePath) {
 		return false
+	}
+
+	if p.anchored {
+		if p.regex.MatchString(filePath) {
+			return true
+		}
+		return p.dirOnly && strings.HasPrefix(filePath, p.pattern+"/")
 	}
 
 	if !p.hasSlash {
@@ -249,12 +258,28 @@ func (p ignorePattern) matchesPathPart(filePath string, isDir bool) bool {
 	return false
 }
 
-func pathMatchesGlob(value, pattern string) bool {
-	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
-	if err != nil {
-		return value == pattern
+func canReincludeDescendant(dirPath string, patterns []ignorePattern) bool {
+	for _, pattern := range patterns {
+		if !pattern.negated {
+			continue
+		}
+		if pattern.anchored {
+			if pattern.pattern == dirPath || strings.HasPrefix(pattern.pattern, dirPath+"/") {
+				return true
+			}
+			continue
+		}
+		if !pattern.hasSlash {
+			return true
+		}
+		if pattern.pattern == dirPath || strings.HasPrefix(pattern.pattern, dirPath+"/") {
+			return true
+		}
+		if strings.Contains(pattern.pattern, "/"+dirPath+"/") || strings.HasSuffix(pattern.pattern, "/"+dirPath) {
+			return true
+		}
 	}
-	return re.MatchString(value)
+	return false
 }
 
 func globToRegex(pattern string) string {
@@ -316,13 +341,4 @@ func scanIgnoreList() map[string]bool {
 		"C0de1ndex":     true,
 		"C0de1ndex.exe": true,
 	}
-}
-
-func hasNegationPattern(patterns []ignorePattern) bool {
-	for _, pattern := range patterns {
-		if pattern.negated {
-			return true
-		}
-	}
-	return false
 }
