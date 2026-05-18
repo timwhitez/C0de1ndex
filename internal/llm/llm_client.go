@@ -44,6 +44,10 @@ func NewLLMClient(config *config.Config, prompts *prompts.Prompts) (*LLMClient, 
 // FilterFilesWithLLM sends the file list to the LLM and returns the filtered list.
 // FilterFilesWithLLM 将文件列表发送给 LLM 并返回过滤后的列表。
 func (c *LLMClient) FilterFilesWithLLM(allFiles []string, gitignorePatterns []string, model string) ([]string, error) {
+	if len(allFiles) == 0 {
+		return nil, nil
+	}
+
 	var filteredFiles []string
 	var err error
 
@@ -100,7 +104,7 @@ func (c *LLMClient) FilterFilesWithLLM(allFiles []string, gitignorePatterns []st
 			FilteredFiles []string `json:"filtered_files"`
 		}](jsonResponse)
 		if err == nil {
-			filteredFiles = parsedResponse.FilteredFiles
+			filteredFiles = keepKnownFiles(parsedResponse.FilteredFiles, allFiles)
 			if !c.Debug {
 				fmt.Printf("\nLLM has filtered files, %d files remaining.\n", len(filteredFiles))
 			}
@@ -111,6 +115,30 @@ func (c *LLMClient) FilterFilesWithLLM(allFiles []string, gitignorePatterns []st
 	}
 
 	return filteredFiles, err
+}
+
+func keepKnownFiles(files []string, allowedFiles []string) []string {
+	allowed := make(map[string]struct{}, len(allowedFiles))
+	for _, file := range allowedFiles {
+		allowed[file] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(files))
+	result := make([]string, 0, len(files))
+	for _, file := range files {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			continue
+		}
+		if _, ok := allowed[file]; !ok {
+			continue
+		}
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		result = append(result, file)
+	}
+	return result
 }
 
 // renderFilterPrompt populates the filter prompt template with data.
