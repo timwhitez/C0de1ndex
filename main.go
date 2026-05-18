@@ -76,48 +76,25 @@ func main() {
 
 	fmt.Printf("开始分析项目: %s\n", dirPath)
 
-	// 2. List all files in the directory
-	allFiles, err := analyzer.ListFiles(dirPath)
-	if err != nil {
-		fmt.Printf("Error listing files: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 3. Parse the .gitignore file
+	// 2. Parse the .gitignore file
 	ignorePatterns, err := analyzer.ParseGitignore(dirPath)
 	if err != nil {
 		fmt.Printf("Error reading .gitignore: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 4. First apply rule-based filtering
-	fmt.Println("应用规则过滤...")
-	// Parse exclude patterns from command line
-	var excludePatternsSlice []string
-	if excludePatterns != "" {
-		excludePatternsSlice = strings.Split(excludePatterns, ",")
-		for i := range excludePatternsSlice {
-			excludePatternsSlice[i] = strings.TrimSpace(excludePatternsSlice[i])
-		}
+	// 3. Scan files with rule-based pruning before any LLM calls.
+	fmt.Println("扫描并应用规则过滤...")
+	ruleFilteredFiles, err := analyzer.ScanFiles(dirPath, analyzer.ScanOptions{
+		GitignorePatterns: ignorePatterns,
+		ExcludePatterns:   splitCSV(excludePatterns),
+		IncludeExtensions: splitCSV(includeExts),
+	})
+	if err != nil {
+		fmt.Printf("Error scanning files: %v\n", err)
+		os.Exit(1)
 	}
-	ruleFilteredFiles := analyzer.FilterFilesByRules(allFiles, ignorePatterns, excludePatternsSlice)
 	fmt.Printf("规则过滤后剩余 %d 个文件\n", len(ruleFilteredFiles))
-
-	// Apply include extensions filter before LLM filtering
-	if includeExts != "" {
-		extensions := strings.Split(includeExts, ",")
-		var tempFiltered []string
-		for _, file := range ruleFilteredFiles {
-			for _, ext := range extensions {
-				if strings.HasSuffix(file, strings.TrimSpace(ext)) {
-					tempFiltered = append(tempFiltered, file)
-					break
-				}
-			}
-		}
-		ruleFilteredFiles = tempFiltered
-		fmt.Printf("扩展名过滤后剩余 %d 个文件\n", len(ruleFilteredFiles))
-	}
 
 	// 5. Then apply LLM filtering
 	fmt.Println("使用LLM进行智能过滤...")
@@ -126,11 +103,6 @@ func main() {
 		fmt.Printf("Error filtering files with LLM: %v\n", err)
 		os.Exit(1)
 	}
-
-
-
-
-
 	if debug {
 		fmt.Println("\n--- Filtered Files (Post-Exclusion) ---")
 		for _, file := range filteredFiles {
@@ -289,4 +261,19 @@ func main() {
 	}
 
 	fmt.Printf("\n项目分析完成。报告已保存到 %s\n", outputFile)
+}
+
+func splitCSV(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

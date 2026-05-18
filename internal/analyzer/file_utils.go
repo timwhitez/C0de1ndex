@@ -2,65 +2,94 @@ package analyzer
 
 import (
 	"bufio"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
+
+type ScanOptions struct {
+	GitignorePatterns []string
+	ExcludePatterns   []string
+	IncludeExtensions []string
+}
+
+type ignorePattern struct {
+	pattern  string
+	negated  bool
+	dirOnly  bool
+	anchored bool
+	hasSlash bool
+	regex    *regexp.Regexp
+}
+
+var builtInExcludePatterns = []string{
+	"node_modules/", "target/", "build/", "dist/", "vendor/", ".venv/", "__pycache__/",
+	".git/", ".idea/", ".vscode/", ".DS_Store", "*.lock", "*.log", "*.zip",
+	"*.tar.gz", "*.bin", "*.so", "*.dll", "*.db", "*.sqlite",
+	"*.min.js", "*.min.css", "*.exe", "*.jar", "*.war", "*.class",
+	"coverage/", "tmp/", "temp/", ".cache/", ".npm/", ".yarn/",
+}
 
 // ListFiles recursively lists all files in a directory, returning their paths relative to the root.
 // It skips directories and files starting with '.', which are common for version control, IDEs, and temporary files.
 // It also skips some predefined files like executables, .env, and prompts.json.
 func ListFiles(root string) ([]string, error) {
+	return ScanFiles(root, ScanOptions{})
+}
+
+func ScanFiles(root string, opts ScanOptions) ([]string, error) {
+	includeExts := normalizeExtensions(opts.IncludeExtensions)
+	patterns := append([]string{}, opts.GitignorePatterns...)
+	patterns = append(patterns, builtInExcludePatterns...)
+	patterns = append(patterns, opts.ExcludePatterns...)
+	compiledPatterns := compileIgnorePatterns(patterns)
+	ignoreList := scanIgnoreList()
+
 	var files []string
-
-	exePath, _ := os.Executable()
-	exeName := filepath.Base(exePath)
-
-	ignoreList := map[string]bool{
-		"prompts.json":  true,
-		".env":          true,
-		exeName:         true,
-		"C0de1ndex":     true,
-		"C0de1ndex.exe": true,
-	}
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(root, func(filePath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		name := info.Name()
-
-		// Skip hidden files and directories, but not "."
-		if name != "." && strings.HasPrefix(name, ".") {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
+		name := d.Name()
+		if name == "." {
 			return nil
 		}
-
-		// Skip temporary files and directories
 		if strings.HasPrefix(name, "~") {
-			if info.IsDir() {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if !info.IsDir() {
-			if ignoreList[name] {
-				return nil
-			}
-
-			relPath, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			files = append(files, relPath)
+		relPath, err := filepath.Rel(root, filePath)
+		if err != nil {
+			return err
 		}
+		relPath = filepath.ToSlash(relPath)
+
+		if d.IsDir() {
+			if isIgnoredCompiled(relPath, true, compiledPatterns) && !canReincludeDescendant(relPath, compiledPatterns) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if ignoreList[name] || isIgnoredCompiled(relPath, false, compiledPatterns) || !extensionAllowed(relPath, includeExts) {
+			return nil
+		}
+
+		files = append(files, relPath)
 		return nil
 	})
-	return files, err
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 // ParseGitignore reads and parses a .gitignore file from the specified root directory.
@@ -98,31 +127,17 @@ func ParseGitignore(root string) ([]string, error) {
 func FilterFilesByRules(files []string, gitignorePatterns []string, excludePatterns []string) []string {
 	var filteredFiles []string
 
-	// Built-in patterns for common files/directories to exclude
-	builtInPatterns := []string{
-		"node_modules", "target", "build", "dist", "vendor", ".venv", "__pycache__",
-		".git", ".idea", ".vscode", ".DS_Store", "*.lock", "*.log", "*.zip",
-		"*.tar.gz", "*.bin", "*.so", "*.dll", "*.db", "*.sqlite",
-		"*.min.js", "*.min.css", "*.exe", "*.jar", "*.war", "*.class",
-		"coverage", "tmp", "temp", ".cache", ".npm", ".yarn",
-	}
-
 	// Combine gitignore patterns with built-in patterns and command-line exclude patterns
-	allPatterns := append(gitignorePatterns, builtInPatterns...)
+	allPatterns := append(gitignorePatterns, builtInExcludePatterns...)
 	if len(excludePatterns) > 0 {
 		allPatterns = append(allPatterns, excludePatterns...)
 	}
+	compiledPatterns := compileIgnorePatterns(allPatterns)
 
 	for _, file := range files {
 		shouldInclude := true
 
-		// Check against all patterns
-		for _, pattern := range allPatterns {
-			if matchesPattern(file, pattern) {
-				shouldInclude = false
-				break
-			}
-		}
+		shouldInclude = !isIgnoredCompiled(file, false, compiledPatterns)
 
 		// Additional rule: exclude test files and fixtures unless they're core logic
 		if shouldInclude && (strings.Contains(file, "test") || strings.Contains(file, "fixture")) {
@@ -143,47 +158,187 @@ func FilterFilesByRules(files []string, gitignorePatterns []string, excludePatte
 
 // matchesPattern checks if a file path matches a gitignore-style pattern
 func matchesPattern(filePath, pattern string) bool {
-	// Normalize path separators
+	compiled := compileIgnorePatterns([]string{pattern})
+	if len(compiled) == 0 {
+		return false
+	}
+	return compiled[0].matches(filepath.ToSlash(filePath), false)
+}
+
+func isIgnored(filePath string, isDir bool, patterns []string) bool {
+	return isIgnoredCompiled(filePath, isDir, compileIgnorePatterns(patterns))
+}
+
+func isIgnoredCompiled(filePath string, isDir bool, patterns []ignorePattern) bool {
+	ignored := false
+	for _, pattern := range patterns {
+		if pattern.matches(filePath, isDir) {
+			ignored = !pattern.negated
+		}
+	}
+	return ignored
+}
+
+func compileIgnorePatterns(patterns []string) []ignorePattern {
+	compiled := make([]ignorePattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		p, ok := compileIgnorePattern(pattern)
+		if ok {
+			compiled = append(compiled, p)
+		}
+	}
+	return compiled
+}
+
+func compileIgnorePattern(pattern string) (ignorePattern, bool) {
+	pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+	if pattern == "" || strings.HasPrefix(pattern, "#") {
+		return ignorePattern{}, false
+	}
+
+	negated := strings.HasPrefix(pattern, "!")
+	if negated {
+		pattern = strings.TrimPrefix(pattern, "!")
+	}
+	anchored := strings.HasPrefix(pattern, "/")
+	dirOnly := strings.HasSuffix(pattern, "/")
+	pattern = strings.TrimSuffix(pattern, "/")
+	pattern = strings.TrimPrefix(pattern, "/")
+	if pattern == "" {
+		return ignorePattern{}, false
+	}
+
+	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
+	if err != nil {
+		return ignorePattern{}, false
+	}
+	return ignorePattern{
+		pattern:  pattern,
+		negated:  negated,
+		dirOnly:  dirOnly,
+		anchored: anchored,
+		hasSlash: strings.Contains(pattern, "/"),
+		regex:    re,
+	}, true
+}
+
+func (p ignorePattern) matches(filePath string, isDir bool) bool {
 	filePath = filepath.ToSlash(filePath)
-	pattern = filepath.ToSlash(pattern)
-	
-	// Handle directory patterns (ending with /)
-	if strings.HasSuffix(pattern, "/") {
-		pattern = strings.TrimSuffix(pattern, "/")
-		return strings.Contains(filePath, pattern+"/") || strings.HasPrefix(filePath, pattern+"/")
+	if p.dirOnly && !isDir && !strings.Contains(filePath, "/") && !p.regex.MatchString(filePath) {
+		return false
 	}
 
-	// Handle patterns starting with /
-	if strings.HasPrefix(pattern, "/") {
-		pattern = strings.TrimPrefix(pattern, "/")
-		return strings.HasPrefix(filePath, pattern)
-	}
-
-	// Handle wildcard patterns
-	if strings.Contains(pattern, "*") {
-		matched, _ := filepath.Match(pattern, filepath.Base(filePath))
-		if matched {
+	if p.anchored {
+		if p.regex.MatchString(filePath) {
 			return true
 		}
-		// Also check full path for patterns like "*.log"
-		matched, _ = filepath.Match(pattern, filePath)
-		return matched
+		return p.dirOnly && strings.HasPrefix(filePath, p.pattern+"/")
 	}
 
-	// Handle directory patterns without trailing slash (like "venv")
-	// Check if the pattern matches any directory component in the path
-	pathParts := strings.Split(filePath, "/")
-	for _, part := range pathParts {
-		if part == pattern {
-			return true
-		}
+	if !p.hasSlash {
+		return p.matchesPathPart(filePath, isDir)
 	}
-	
-	// Also check if the file is inside a directory that matches the pattern
-	if strings.Contains(filePath, pattern+"/") || strings.HasPrefix(filePath, pattern+"/") {
+
+	if p.regex.MatchString(filePath) {
 		return true
 	}
+	if p.dirOnly {
+		return strings.HasPrefix(filePath, p.pattern+"/")
+	}
+	return false
+}
 
-	// Handle exact matches and substring matches
-	return strings.Contains(filePath, pattern) || filepath.Base(filePath) == pattern
+func (p ignorePattern) matchesPathPart(filePath string, isDir bool) bool {
+	parts := strings.Split(filePath, "/")
+	for i, part := range parts {
+		if p.regex.MatchString(part) {
+			return !p.dirOnly || isDir || i < len(parts)-1
+		}
+	}
+	return false
+}
+
+func canReincludeDescendant(dirPath string, patterns []ignorePattern) bool {
+	for _, pattern := range patterns {
+		if !pattern.negated {
+			continue
+		}
+		if pattern.anchored {
+			if pattern.pattern == dirPath || strings.HasPrefix(pattern.pattern, dirPath+"/") {
+				return true
+			}
+			continue
+		}
+		if !pattern.hasSlash {
+			return true
+		}
+		if pattern.pattern == dirPath || strings.HasPrefix(pattern.pattern, dirPath+"/") {
+			return true
+		}
+		if strings.Contains(pattern.pattern, "/"+dirPath+"/") || strings.HasSuffix(pattern.pattern, "/"+dirPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func globToRegex(pattern string) string {
+	var b strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		case '.', '+', '(', ')', '|', '[', ']', '{', '}', '^', '$', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(pattern[i])
+		default:
+			b.WriteByte(pattern[i])
+		}
+	}
+	return b.String()
+}
+
+func normalizeExtensions(exts []string) map[string]struct{} {
+	if len(exts) == 0 {
+		return nil
+	}
+	result := make(map[string]struct{}, len(exts))
+	for _, ext := range exts {
+		ext = strings.TrimSpace(strings.ToLower(ext))
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		result[ext] = struct{}{}
+	}
+	return result
+}
+
+func extensionAllowed(filePath string, includeExts map[string]struct{}) bool {
+	if len(includeExts) == 0 {
+		return true
+	}
+	_, ok := includeExts[strings.ToLower(filepath.Ext(filePath))]
+	return ok
+}
+
+func scanIgnoreList() map[string]bool {
+	exePath, _ := os.Executable()
+	exeName := filepath.Base(exePath)
+	return map[string]bool{
+		"prompts.json":  true,
+		".env":          true,
+		exeName:         true,
+		"C0de1ndex":     true,
+		"C0de1ndex.exe": true,
+	}
 }
